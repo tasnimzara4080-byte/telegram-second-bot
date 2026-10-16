@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import logging
 import os
+import sqlite3
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -26,7 +27,6 @@ def keep_alive():
 TOKEN = os.getenv('BOT_TOKEN', '').strip()
 ADMIN_IDS = {int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip().isdigit()}
 DB_PATH = os.getenv('DB_PATH', 'romi.db')
-BD_TZ = timezone(timedelta(hours=6)) if 'timezone' in globals() else datetime.timezone(datetime.timedelta(hours=6))
 
 # Safe timezone setup
 BD_TZ = datetime.timezone(datetime.timedelta(hours=6))
