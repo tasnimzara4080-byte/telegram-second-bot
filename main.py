@@ -1,14 +1,35 @@
-import os
-import sqlite3
+import asyncio
+import datetime
 import logging
-from datetime import datetime, timedelta, timezone
+import os
+from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from flask import Flask
+
+# Keep-alive web server for Render Web Service to avoid Timeouts
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "RoMi Star Board Master Edition is running 24/7 online!"
+
+def run_web():
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.daemon = True
+    t.start()
 
 TOKEN = os.getenv('BOT_TOKEN', '').strip()
 ADMIN_IDS = {int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip().isdigit()}
 DB_PATH = os.getenv('DB_PATH', 'romi.db')
-BD_TZ = timezone(timedelta(hours=6))
+BD_TZ = timezone(timedelta(hours=6)) if 'timezone' in globals() else datetime.timezone(datetime.timedelta(hours=6))
+
+# Safe timezone setup
+BD_TZ = datetime.timezone(datetime.timedelta(hours=6))
 
 logging.basicConfig(format='%(asctime)s | %(levelname)s | %(name)s | %(message)s', level=logging.INFO)
 logging.getLogger('httpx').setLevel(logging.WARNING)
@@ -64,7 +85,7 @@ ADMIN_MENU = ReplyKeyboardMarkup([
 
 def menu_for(uid): return ADMIN_MENU if is_admin(uid) else USER_MENU
 
-def now(): return datetime.now(BD_TZ)
+def now(): return datetime.datetime.now(BD_TZ)
 def today(): return now().date().isoformat()
 def is_admin(uid): return uid in ADMIN_IDS
 
@@ -120,7 +141,7 @@ def score(rows, uid=None, scope='all', cut=None):
     points = 0; total_acc = 0; streak = 0; prev = None; best = 0
     mult = get_multiplier()
     for r in rows:
-        d = datetime.fromisoformat(r['day']).date() if len(r['day'])==10 else datetime.fromisoformat(r['day'])
+        d = datetime.date.fromisoformat(r['day']) if len(r['day'])==10 else datetime.datetime.fromisoformat(r['day']).date()
         n = int(r['count'])
         total_acc += n
         base_earned = (n + int(r['record_bonus'] or 0)) * mult
@@ -235,49 +256,37 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.effective_message.reply_text(msg)
 
-# --- BROADCAST NOTICE SYSTEM ---
 async def notice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not context.args:
         await update.effective_message.reply_text(
             "⚠️ **ব্যবহারের সঠিক নিয়ম:**\n"
-            "`/notice আপনার গুরুত্বপূর্ণ নোটিশ মেসেজটি এখানে লিখুন`\n\n"
-            "💡 *উদাহরণ:* `/notice আজকের কাজের সময় রাত ১১টা পর্যন্ত বাড়ানো হলো!`"
+            "`/notice আপনার গুরুত্বপূর্ণ নোটিশ মেসেজটি এখানে লিখুন`"
         )
         return
 
     notice_text = " ".join(context.args)
     members = conn.execute("SELECT user_id FROM members").fetchall()
-    
     if not members:
         await update.effective_message.reply_text("⚠️ বটে বর্তমানে কোনো মেম্বার রেজিস্টার্ড নেই।")
         return
 
     count = 0
     full_message = f"📢 **IMPORTANT NOTICE** 📢\n═══════════════════════\n{notice_text}\n═══════════════════════"
-    
     for m in members:
         try:
             await context.bot.send_message(m['user_id'], full_message)
             count += 1
-        except Exception:
-            pass
-
+        except Exception: pass
     await update.effective_message.reply_text(f"🚀 সফলভাবে **{count}** জন মেম্বারের কাছে ব্রডকাস্ট করা হয়েছে!")
 
-# --- MISSING ACCOUNTS SYSTEM ---
 async def addmissing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_member(update.effective_user)
     if len(context.args) < 2:
-        await update.effective_message.reply_text(
-            "⚠️ **সঠিক ফরম্যাট:**\n"
-            "`/addmissing [Withdraw_No] [Count]`\n\n"
-            "💡 *উদাহরণ:* `/addmissing 1 15`"
-        )
+        await update.effective_message.reply_text("⚠️ **সঠিক ফরম্যাট:** `/addmissing [Withdraw_No] [Count]`")
         return
     try:
-        w_no = int(context.args[0])
-        count = int(context.args[1])
+        w_no = int(context.args[0]); count = int(context.args[1])
         if w_no <= 0 or count < 0: raise ValueError
     except ValueError:
         await update.effective_message.reply_text("❌ উইথড্র নম্বর এবং মিসিং অ্যাকাউন্টের সংখ্যা সঠিক ধনাত্মক সংখ্যা হতে হবে।")
@@ -296,11 +305,9 @@ async def mymissing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     save_member(update.effective_user)
     rows = conn.execute("SELECT withdraw_no, missing_count FROM missing_accounts WHERE user_id=? ORDER BY withdraw_no", (uid,)).fetchall()
-    
     if not rows:
         await update.effective_message.reply_text("📭 আপনার কোনো মিসিং অ্যাকাউন্টের রেকর্ড পাওয়া যায়নি।")
         return
-
     lines = ["📌 **আপনার মিসিং অ্যাকাউন্টের তালিকা:**", "═══════════════════════"]
     total = 0
     for r in rows:
@@ -316,28 +323,19 @@ async def allmissing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.effective_message.reply_text("📭 কারো কোনো মিসিং অ্যাকাউন্টের হিসাব পাওয়া যায়নি।")
         return
-
     lines = ["📊 **সকল মেম্বারদের মিসিং অ্যাকাউন্টের হিসাব:**", "═══════════════════════"]
-    current_uid = None
-    user_total = 0
-    grand_total = 0
-
+    current_uid = None; user_total = 0; grand_total = 0
     for r in rows:
         uid = r['user_id']
         if uid != current_uid:
             if current_uid is not None:
                 lines.append(f"   └ **মোট মিসিং:** `{user_total} টি`\n")
-            current_uid = uid
-            user_total = 0
+            current_uid = uid; user_total = 0
             lines.append(f"👤 **User:** {name_of(uid)}")
-        
         lines.append(f"   • Withdraw `#{r['withdraw_no']}` ➔ `{r['missing_count']} টি`")
-        user_total += int(r['missing_count'])
-        grand_total += int(r['missing_count'])
-
+        user_total += int(r['missing_count']); grand_total += int(r['missing_count'])
     if current_uid is not None:
         lines.append(f"   └ **মোট মিসিং:** `{user_total} টি`")
-
     lines.append("═══════════════════════")
     lines.append(f"🔥 **গ্রুপের সর্বমোট মিসিং অ্যাকাউন্ট:** `{grand_total} টি`")
     await update.effective_message.reply_text("\n".join(lines))
@@ -370,19 +368,14 @@ async def delmissing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.effective_message.reply_text(f"❌ ত্রুটি: {e}")
 
-# --- REPORT HANDLING ---
 async def begin_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['waiting_report'] = True
     context.user_data['editing_rep_id'] = None
-    await update.effective_message.reply_text(
-        '📝 **আজকের কাজের সংখ্যা লিখে বা স্ক্রিনশট প্রুফসহ সেন্ড করো।**\n'
-        '*(উদাহরণ: শুধু সংখ্যা লিখে পাঠান যেমন: 45)*'
-    )
+    await update.effective_message.reply_text('📝 **আজকের কাজের সংখ্যা লিখে বা স্ক্রিনশট প্রুফসহ সেন্ড করো।**')
 
 async def handle_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     raw_text = (msg.caption or msg.text or '').strip()
-
     menu_buttons = ['Submit Report', 'My Points', 'My Missing Accounts', 'Leaderboard', 'Weekly Board', 'My Profile', 'Admin Panel', 'Help']
     if raw_text in menu_buttons or any(b.lower() in raw_text.lower() for b in menu_buttons):
         context.user_data['waiting_report'] = False
@@ -394,10 +387,7 @@ async def handle_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await menu_router(update, context)
         return
 
-    photo_id = ""
-    if msg.photo:
-        photo_id = msg.photo[-1].file_id
-
+    photo_id = msg.photo[-1].file_id if msg.photo else ""
     try:
         n = int(raw_text)
         if n < 0 or n > 100000: raise ValueError
@@ -414,13 +404,10 @@ async def handle_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.execute("UPDATE reports SET count=?, photo_id=CASE WHEN ?!='' THEN ? ELSE photo_id END WHERE id=?", 
                          (n, photo_id, photo_id, editing_id))
             conn.commit()
-            context.user_data['waiting_report'] = False
-            context.user_data['editing_rep_id'] = None
+            context.user_data['waiting_report'] = False; context.user_data['editing_rep_id'] = None
             await update.effective_message.reply_text(f"✏️ আপনার রিপোর্ট (`ID: #{editing_id}`) সংশোধন করে `{n}` করা হয়েছে।")
-            
             for aid in ADMIN_IDS:
-                try:
-                    await context.bot.send_message(aid, f"🔄 **REPORT EDITED BY USER**\n👤 User: {user.full_name}\n📌 Report ID: `#{editing_id}`\n🎯 New Count: `{n}`")
+                try: await context.bot.send_message(aid, f"🔄 **REPORT EDITED BY USER**\n👤 User: {user.full_name}\n📌 Report ID: `#{editing_id}`\n🎯 New Count: `{n}`")
                 except Exception: pass
             return
 
@@ -438,19 +425,12 @@ async def handle_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for aid in ADMIN_IDS:
         try:
             admin_msg = f'📥 **New Pending Report (`#{rep_id}`)**\n👤 User: {user.full_name}\n🆔 ID: `{user.id}`\n📅 Date: `{d}`\n🎯 Accounts: `{n}`'
-            if photo_id:
-                await context.bot.send_photo(aid, photo=photo_id, caption=admin_msg, reply_markup=review_kb(rep_id))
-            else:
-                await context.bot.send_message(aid, text=admin_msg, reply_markup=review_kb(rep_id))
+            if photo_id: await context.bot.send_photo(aid, photo=photo_id, caption=admin_msg, reply_markup=review_kb(rep_id))
+            else: await context.bot.send_message(aid, text=admin_msg, reply_markup=review_kb(rep_id))
         except Exception: log.exception('Admin notify failed')
 
 async def user_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    data = q.data.split(':')
-    action = data[0]
-    rep_id = int(data[1])
-    uid = q.from_user.id
-
+    q = update.callback_query; data = q.data.split(':'); action = data[0]; rep_id = int(data[1]); uid = q.from_user.id
     row = conn.execute("SELECT * FROM reports WHERE id=? AND user_id=?", (rep_id, uid)).fetchone()
     if not row or row['status'] != 'pending':
         await q.answer("⚠️ রিপোর্টটি পাওয়া যায়নি বা ইতিমধ্যে রিভিউ হয়ে গেছে!", show_alert=True); return
@@ -460,8 +440,7 @@ async def user_action_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         conn.commit()
         await q.edit_message_text("🗑️ আপনার রিপোর্টটি সফলভাবে ডিলিট করা হয়েছে।")
     elif action == 'useredit':
-        context.user_data['waiting_report'] = True
-        context.user_data['editing_rep_id'] = rep_id
+        context.user_data['waiting_report'] = True; context.user_data['editing_rep_id'] = rep_id
         await q.edit_message_text("✏️ আপনার সঠিক কাজের সংখ্যাটি লিখে বা ছবিসহ আবার পাঠান:")
 
 async def my_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -483,7 +462,6 @@ async def my_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user; save_member(u); x = points_info(u.id); ranked = board_data('all')
     rank = next((i for i, (_, _, uid) in enumerate(ranked, 1) if uid == u.id), None)
-
     await update.effective_message.reply_text(
         f"👤 **MY PROFILE CARD**\n"
         f"═══════════════════════\n"
@@ -497,80 +475,57 @@ async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ **Pending:** `{x['pending']}`"
     )
 
-async def show_board(update, context, scope):
-    await update.effective_message.reply_text(board_text(scope))
-
+async def show_board(update, context, scope): await update.effective_message.reply_text(board_text(scope))
 async def daily_board(update, context): await show_board(update, context, 'daily')
 async def weekly_board(update, context): await show_board(update, context, 'weekly')
 async def total_board(update, context): await show_board(update, context, 'all')
 
 async def clear_history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
-    conn.execute("DELETE FROM reports")
-    conn.execute("DELETE FROM personal_records")
-    conn.execute("DELETE FROM manual_adjustments")
-    conn.execute("DELETE FROM reset_log")
-    conn.execute("DELETE FROM missing_accounts")
+    conn.execute("DELETE FROM reports"); conn.execute("DELETE FROM personal_records")
+    conn.execute("DELETE FROM manual_adjustments"); conn.execute("DELETE FROM reset_log"); conn.execute("DELETE FROM missing_accounts")
     conn.commit()
     await update.effective_message.reply_text("🔄 ডাটাবেজ সফলভাবে সম্পূর্ণ রিসেট করা হয়েছে!")
 
 async def announce_mvp_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not is_admin(q.from_user.id): await q.answer('⚠️ শুধু Admin এটি করতে পারবেন।', show_alert=True); return
-    
     d = today()
     rows = conn.execute("SELECT user_id, SUM(count) as total_cnt FROM reports WHERE day=? AND status='approved' GROUP BY user_id ORDER BY total_cnt DESC LIMIT 3", (d,)).fetchall()
     if not rows:
         await q.answer("⚠️ আজকের কোনো অনুমোদিত রিপোর্ট পাওয়া যায়নি!", show_alert=True); return
-
-    lines = [
-        "🌟 **DAILY MVP / TOP 3 CHAMPIONS** 🌟",
-        "═══════════════════════",
-        f"📅 Date: `{d}`\n"
-    ]
+    lines = ["🌟 **DAILY MVP / TOP 3 CHAMPIONS** 🌟", "═══════════════════════", f"📅 Date: `{d}`\n"]
     medals = ['🥇', '🥈', '🥉']
     for idx, r in enumerate(rows):
-        uid = r['user_id']
-        cnt = r['total_cnt']
-        pts = points_info(uid)['points']
+        uid = r['user_id']; cnt = r['total_cnt']; pts = points_info(uid)['points']
         lines.append(f"{medals[idx]} **Top #{idx+1}: {name_of(uid)}**\n   └ 🎯 `{cnt} Accounts` | ✨ `{pts} pts`")
-
     lines.append("\n🎉 অসাধারণ পারফরম্যান্সের জন্য সবাইকে অভিনন্দন!")
     mvp_card = "\n".join(lines)
-    
-    members = conn.execute("SELECT user_id FROM members").fetchall()
-    for m in members:
+    for m in conn.execute("SELECT user_id FROM members").fetchall():
         try: await context.bot.send_message(m['user_id'], mvp_card)
         except Exception: pass
-
     await q.edit_message_text("✅ আজকের Top 3 Daily MVP সফলভাবে ব্রডকাস্ট করা হয়েছে!")
 
 async def send_reminder_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not is_admin(q.from_user.id): return
-    members = conn.execute("SELECT user_id FROM members").fetchall()
     count = 0
-    for m in members:
-        try:
-            await context.bot.send_message(m['user_id'], "⏰ **DAILY WORK REPORT REMINDER**\n⚡ দ্রুত আপনার আজকের কাজের সংখ্যা জমা দিন!")
-            count += 1
+    for m in conn.execute("SELECT user_id FROM members").fetchall():
+        try: await context.bot.send_message(m['user_id'], "⏰ **DAILY WORK REPORT REMINDER**\n⚡ দ্রুত আপনার আজকের কাজের সংখ্যা জমা দিন!"); count += 1
         except Exception: pass
     await q.edit_message_text(f"✅ রিমাইন্ডার সফলভাবে **{count}** জন মেম্বারের কাছে পাঠানো হয়েছে।")
 
 async def cycle_summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     rows = conn.execute("SELECT user_id, SUM(count) as c FROM reports WHERE status='approved' GROUP BY user_id ORDER BY c DESC LIMIT 5").fetchall()
-    if not rows:
-        await update.effective_message.reply_text("📭 কোনো অনুমোদিত রিপোর্ট নেই।"); return
-    
+    if not rows: await update.effective_message.reply_text("📭 কোনো অনুমোদিত রিপোর্ট নেই।"); return
     lines = ["📊 **WORK CYCLE SUMMARY (Top 5)**", "═══════════════════════"]
-    for i, r in enumerate(rows, 1):
-        lines.append(f"{i}. **{name_of(r['user_id'])}** ➔ `{r['c']} Accounts`")
+    for i, r in enumerate(rows, 1): lines.append(f"{i}. **{name_of(r['user_id'])}** ➔ `{r['c']} Accounts`")
     await update.effective_message.reply_text("\n".join(lines))
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.effective_message.reply_text('⚠️ এই অপشن শুধু Admin-এর জন্য।'); return
+        await update.effective_message.reply_text('⚠️ এই অপশন শুধু Admin-এর জন্য।'); return
     kb = InlineKeyboardMarkup([
       [InlineKeyboardButton('📢 Announce Top 3 MVP', callback_data='announce_mvp')],
       [InlineKeyboardButton('⏰ Send Reminder', callback_data='send_reminder')],
@@ -583,23 +538,14 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'═══════════════════════\n'
         f'⚙️ **Current Multiplier:** `{mult}x`\n\n'
         f'🛠️ **Admin Commands:**\n'
-        f'• নোটিশ পাঠানো: `/notice [Message]`\n'
-        f'• হিস্ট্রি রিসেট: `/clearhistory`\n'
-        f'• সামারি দেখা: `/summary`\n'
-        f'• হ্যাপি আওয়ার: `/happyhour 2`\n'
-        f'• রিপোর্ট এডিট: `/editreport ID COUNT`\n'
-        f'• রিপোর্ট ডিলিট: `/deletereport ID`\n'
-        f'• পয়েন্ট যোগ: `/addpts UID PTS [Reason]`\n'
-        f'• পয়েন্ট কাটুন: `/deductpts UID PTS [Reason]`\n'
-        f'• রেকর্ড সেট: `/setrecord UID COUNT`\n'
-        f'• মেম্বারদের মিসিং: `/allmissing`\n'
-        f'• মিসিং এডিট/ডিলিট: `/editmissing` / `/delmissing`\n\n'
+        f'• নোটিশ: `/notice [Msg]` | সামারি: `/summary`\n'
+        f'• পয়েন্ট যোগ: `/addpts UID PTS` | কাটুন: `/deductpts UID PTS`\n'
+        f'• মিসিং লিস্ট: `/allmissing`\n\n'
         '👇 নিচের অপশনগুলো থেকে বেছে নিন:', reply_markup=kb
     )
 
 async def happyhour_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    if len(context.args) != 1: return
+    if not is_admin(update.effective_user.id) or len(context.args) != 1: return
     try: val = float(context.args[0])
     except ValueError: return
     conn.execute("INSERT INTO settings(key, value) VALUES('multiplier', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(val),))
@@ -607,87 +553,56 @@ async def happyhour_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(f"🔥 **Happy Hour Activated!** Multiplier set to `{val}x`")
 
 async def addpts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    if len(context.args) < 2:
-        await update.effective_message.reply_text("⚠️ ব্যবহার: `/addpts USER_ID POINTS [Reason]`")
-        return
+    if not is_admin(update.effective_user.id) or len(context.args) < 2: return
     try:
         uid = int(context.args[0]); pts = int(context.args[1]); reason = " ".join(context.args[2:]) or "Bonus"
-        conn.execute("INSERT INTO manual_adjustments(user_id, points, reason, created_at) VALUES(?,?,?,?)",
-                     (uid, pts, reason, now().isoformat(timespec='seconds')))
+        conn.execute("INSERT INTO manual_adjustments(user_id, points, reason, created_at) VALUES(?,?,?,?)", (uid, pts, reason, now().isoformat(timespec='seconds')))
         conn.commit()
-        await update.effective_message.reply_text(f"✅ User `{uid}`-কে `+{pts}` পয়েন্ট সফলভাবে যোগ করা হয়েছে।")
-        try: await context.bot.send_message(uid, f"🎉 অভিনন্দন! Admin আপনার অ্যাকাউন্টে `+{pts}` বোনাস পয়েন্ট যোগ করেছেন! 🎁")
+        await update.effective_message.reply_text(f"✅ User `{uid}`-কে `+{pts}` পয়েন্ট যোগ করা হয়েছে।")
+        try: await context.bot.send_message(uid, f"🎉 অভিনন্দন! Admin আপনার অ্যাকাউন্টে `+{pts}` বোনাস পয়েন্ট যোগ করেছেন!")
         except Exception: pass
-    except Exception as e:
-        await update.effective_message.reply_text(f"❌ ত্রুটি: {e}")
+    except Exception as e: await update.effective_message.reply_text(f"❌ ত্রুটি: {e}")
 
 async def deductpts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    if len(context.args) < 2:
-        await update.effective_message.reply_text("⚠️ ব্যবহার: `/deductpts USER_ID POINTS [Reason]`")
-        return
+    if not is_admin(update.effective_user.id) or len(context.args) < 2: return
     try:
         uid = int(context.args[0]); pts = int(context.args[1]); reason = " ".join(context.args[2:]) or "Penalty"
-        conn.execute("INSERT INTO manual_adjustments(user_id, points, reason, created_at) VALUES(?,?,?,?)",
-                     (uid, -pts, reason, now().isoformat(timespec='seconds')))
+        conn.execute("INSERT INTO manual_adjustments(user_id, points, reason, created_at) VALUES(?,?,?,?)", (uid, -pts, reason, now().isoformat(timespec='seconds')))
         conn.commit()
         await update.effective_message.reply_text(f"⚠️ User `{uid}`-এর অ্যাকাউন্ট থেকে `-{pts}` পয়েন্ট কমানো হয়েছে।")
         try: await context.bot.send_message(uid, f"⚠️ Admin আপনার অ্যাকাউন্ট থেকে `-{pts}` পয়েন্ট সমন্বয় করেছেন।")
         except Exception: pass
-    except Exception as e:
-        await update.effective_message.reply_text(f"❌ ত্রুটি: {e}")
+    except Exception as e: await update.effective_message.reply_text(f"❌ ত্রুটি: {e}")
 
 async def setrecord_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    if len(context.args) != 2:
-        await update.effective_message.reply_text("⚠️ ব্যবহার: `/setrecord USER_ID COUNT`")
-        return
-    try:
-        uid = int(context.args[0]); count = int(context.args[1])
-        conn.execute('INSERT INTO personal_records(user_id, best_count, updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET best_count=excluded.best_count, updated_at=excluded.updated_at', 
-                     (uid, count, now().isoformat(timespec='seconds')))
-        conn.commit()
-        await update.effective_message.reply_text(f"✅ User `{uid}`-এর Personal Record সফলভাবে `{count}` সেট করা হয়েছে।")
-    except Exception as e:
-        await update.effective_message.reply_text(f"❌ ত্রুটি: {e}")
+    if not is_admin(update.effective_user.id) or len(context.args) != 2: return
+    uid = int(context.args[0]); count = int(context.args[1])
+    conn.execute('INSERT INTO personal_records(user_id, best_count, updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET best_count=excluded.best_count', (uid, count, now().isoformat(timespec='seconds')))
+    conn.commit()
+    await update.effective_message.reply_text(f"✅ User `{uid}`-এর Record `{count}` সেট করা হয়েছে।")
 
 async def deletereport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    if len(context.args) != 1:
-        await update.effective_message.reply_text("⚠️ ব্যবহার: `/deletereport REPORT_ID`")
-        return
-    try:
-        rep_id = int(context.args[0])
-        row = conn.execute("SELECT * FROM reports WHERE id=?", (rep_id,)).fetchone()
-        if not row:
-            await update.effective_message.reply_text(f"⚠️ Report ID `#{rep_id}` পাওয়া যায়নি।")
-            return
-        
-        uid = row['user_id']
-        conn.execute("DELETE FROM reports WHERE id=?", (rep_id,))
-        conn.commit()
-        
-        current_max = conn.execute("SELECT MAX(count) as m FROM reports WHERE user_id=? AND status='approved'", (uid,)).fetchone()['m'] or 0
-        conn.execute('INSERT INTO personal_records(user_id, best_count, updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET best_count=excluded.best_count, updated_at=excluded.updated_at', 
-                     (uid, int(current_max), now().isoformat(timespec='seconds')))
-        conn.commit()
-
-        await update.effective_message.reply_text(f"🗑️ Report ID `#{rep_id}` সফলভাবে ডিলিট করা হয়েছে।")
-    except Exception as e:
-        await update.effective_message.reply_text(f"❌ ত্রুটি: {e}")
+    if not is_admin(update.effective_user.id) or len(context.args) != 1: return
+    rep_id = int(context.args[0])
+    row = conn.execute("SELECT * FROM reports WHERE id=?", (rep_id,)).fetchone()
+    if not row: await update.effective_message.reply_text("⚠️ রিপোর্ট পাওয়া যায়নি।"); return
+    uid = row['user_id']
+    conn.execute("DELETE FROM reports WHERE id=?", (rep_id,)); conn.commit()
+    current_max = conn.execute("SELECT MAX(count) as m FROM reports WHERE user_id=? AND status='approved'", (uid,)).fetchone()['m'] or 0
+    conn.execute('INSERT INTO personal_records(user_id, best_count, updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET best_count=excluded.best_count', (uid, int(current_max), now().isoformat(timespec='seconds')))
+    conn.commit()
+    await update.effective_message.reply_text(f"🗑️ Report `#{rep_id}` ডিলিট করা হয়েছে।")
 
 async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not is_admin(q.from_user.id): return
     action = q.data.split(':', 1)[1]
     if action == 'pending': await q.answer(); await send_pending(q, context); return
-    
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton('✅ Confirm Reset', callback_data=f'resetconfirm:{action}'),
+        InlineKeyboardButton('✅ Confirm', callback_data=f'resetconfirm:{action}'),
         InlineKeyboardButton('❌ Cancel', callback_data='resetcancel')
     ]])
-    await q.edit_message_text(f'⚠️ আপনি কি নিশ্চিত? `{action.capitalize()}` ডাটা রিসেট করা হবে।', reply_markup=kb)
+    await q.edit_message_text(f'⚠️ নিশ্চিত করুন: `{action.capitalize()}` ডাটা রিসেট হবে।', reply_markup=kb)
 
 async def reset_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -696,62 +611,46 @@ async def reset_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scope, day = (action, today() if action == 'daily' else '')
     conn.execute('INSERT INTO reset_log(scope, target_day, cutoff_at, admin_id) VALUES(?,?,?,?)', (scope, day, stamp, q.from_user.id))
     conn.commit()
-    await q.edit_message_text(f"✅ `{action.capitalize()}` Reset সফলভাবে সম্পন্ন হয়েছে।")
+    await q.edit_message_text(f"✅ `{action.capitalize()}` Reset সফল হয়েছে।")
 
 async def cancel_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.edit_message_text('❌ Reset অপারেশন বাতিল করা হয়েছে।')
+    await update.callback_query.edit_message_text('❌ বাতিল করা হয়েছে।')
 
 async def send_pending(target, context):
     rows = conn.execute("SELECT id,user_id,day,count,photo_id FROM reports WHERE status='pending' ORDER BY id").fetchall()
-    if not rows: await target.message.reply_text('📭 বর্তমানে কোনো pending report নেই।'); return
-    await target.message.reply_text(f'⏳ **Pending Reports Count:** `{len(rows)}`')
+    if not rows: await target.message.reply_text('📭 কোনো pending report নেই।'); return
+    await target.message.reply_text(f'⏳ **Pending Reports:** `{len(rows)}`')
     for r in rows:
-        text = f"📥 **Pending Report (`#{r['id']}`)**\n👤 User: {name_of(r['user_id'])}\n🆔 ID: `{r['user_id']}`\n📅 Date: `{r['day']}`\n🎯 Accounts: `{r['count']}`"
-        if r['photo_id']:
-            await target.message.reply_photo(photo=r['photo_id'], caption=text, reply_markup=review_kb(r['id']))
-        else:
-            await target.message.reply_text(text, reply_markup=review_kb(r['id']))
+        text = f"📥 **Pending Report (`#{r['id']}`)**\n👤 User: {name_of(r['user_id'])}\n🎯 Accounts: `{r['count']}`"
+        if r['photo_id']: await target.message.reply_photo(photo=r['photo_id'], caption=text, reply_markup=review_kb(r['id']))
+        else: await target.message.reply_text(text, reply_markup=review_kb(r['id']))
 
 async def pending_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    await send_pending(update.effective_message, context)
+    if is_admin(update.effective_user.id): await send_pending(update.effective_message, context)
 
 async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not is_admin(q.from_user.id): return
-    try:
-        _, action, rep_id = q.data.split(':')
-        rep_id = int(rep_id)
+    try: _, action, rep_id = q.data.split(':'); rep_id = int(rep_id)
     except Exception: return
-    
     row_data = conn.execute('SELECT * FROM reports WHERE id=? AND status=\'pending\'', (rep_id,)).fetchone()
-    if not row_data:
-        await q.edit_message_text('⚠️ এই রিপোর্টটি ইতিমধ্যে প্রসেস করা হয়েছে।'); return
-    
+    if not row_data: await q.edit_message_text('⚠️ ইতিমধ্যে প্রসেস করা হয়েছে।'); return
     uid = row_data['user_id']; d = row_data['day']; n_report = int(row_data['count'])
-    old_record = lifetime_record(uid)
-    status = 'approved' if action == 'approve' else 'rejected'
+    old_record = lifetime_record(uid); status = 'approved' if action == 'approve' else 'rejected'
     new_record = (action == 'approve' and n_report > old_record)
-    
     conn.execute("UPDATE reports SET status=?, reviewed_at=?, record_bonus=? WHERE id=?", 
                  (status, now().isoformat(timespec='seconds'), (10 if new_record else 0), rep_id))
-    
     if new_record:
-        conn.execute('INSERT INTO personal_records(user_id, best_count, updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET best_count=excluded.best_count, updated_at=excluded.updated_at', 
-                     (uid, n_report, now().isoformat(timespec='seconds')))
+        conn.execute('INSERT INTO personal_records(user_id, best_count, updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET best_count=excluded.best_count', (uid, n_report, now().isoformat(timespec='seconds')))
     conn.commit()
-    
     if action == 'approve':
-        info = points_info(uid)
-        res = f"✅ **Report #{rep_id} Approved!**\n✨ Points: `{info['points']}` | 🎯 Accounts: `{info['accounts']}`"
-        try: await context.bot.send_message(uid, f"🎉 অভিনন্দন! আপনার `{d}` তারিখের রিপোর্ট (`ID: #{rep_id}`) **Approved** হয়েছে!\n🎯 Accounts: `{n_report}`\n✨ Total Points: `{info['points']}`")
+        info = points_info(uid); res = f"✅ **Report #{rep_id} Approved!**"
+        try: await context.bot.send_message(uid, f"🎉 অভিনন্দন! আপনার রিপোর্ট (`ID: #{rep_id}`) **Approved** হয়েছে! ✨ Points: `{info['points']}`")
         except Exception: pass
     else:
         res = f'❌ **Report #{rep_id} Rejected.**'
-        try: await context.bot.send_message(uid, f'❌ দুঃখিত! আপনার `{d}` তারিখের রিপোর্ট (`ID: #{rep_id}`) **Reject** করা হয়েছে।')
+        try: await context.bot.send_message(uid, f'❌ দুঃখিত! আপনার রিপোর্ট (`ID: #{rep_id}`) **Reject** হয়েছে।')
         except Exception: pass
-
     if q.message.photo: await q.edit_message_caption(caption=res)
     else: await q.edit_message_text(res)
 
@@ -762,42 +661,29 @@ async def editreport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rep_id = int(context.args[0]); new_count = int(context.args[1])
             conn.execute("UPDATE reports SET count=? WHERE id=?", (new_count, rep_id))
             conn.commit()
-            await update.effective_message.reply_text(f"✅ Report `#{rep_id}` আপডেট করে `{new_count}` অ্যাকাউন্ট করা হয়েছে।")
-            return
-        except Exception as e:
-            await update.effective_message.reply_text(f"❌ ত্রুটি: {e}")
-            return
-    elif len(context.args) == 3:
-        try:
-            uid = int(context.args[0]); d = context.args[1]; new_count = int(context.args[2])
-            conn.execute("UPDATE reports SET count=? WHERE user_id=? AND day=?", (new_count, uid, d))
-            conn.commit()
-            await update.effective_message.reply_text(f"✅ User `{uid}` এর `{d}` তারিখের রিপোর্ট আপডেট করা হয়েছে।")
-            return
-        except Exception as e:
-            await update.effective_message.reply_text(f"❌ ত্রুটি: {e}")
-            return
-    await update.effective_message.reply_text("⚠️ ব্যবহার:\n1) `/editreport REPORT_ID NEW_COUNT`\n2) `/editreport USER_ID YYYY-MM-DD NEW_COUNT`")
+            await update.effective_message.reply_text(f"✅ Report `#{rep_id}` আপডেট করা হয়েছে।")
+        except Exception as e: await update.effective_message.reply_text(f"❌ ত্রুটি: {e}")
 
 async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.effective_message.text or '').strip(); save_member(update.effective_user)
     routes = {
-        'Submit Report': begin_report, 'My Points': my_points,
-        'My Missing Accounts': mymissing_cmd,
+        'Submit Report': begin_report, 'My Points': my_points, 'My Missing Accounts': mymissing_cmd,
         'Leaderboard': total_board, 'Weekly Board': weekly_board, 'My Profile': my_profile,
         'Admin Panel': admin_panel, 'Help': help_cmd
     }
     for k, fn in routes.items():
-        if k.lower() in text.lower():
-            await fn(update, context)
-            return
-    await update.effective_message.reply_text('👇 দয়া করে নিচের মেনু থেকে একটি অপশন বেছে নিন:', reply_markup=menu_for(update.effective_user.id))
+        if k.lower() in text.lower(): await fn(update, context); return
+    await update.effective_message.reply_text('👇 অপশন বেছে নিন:', reply_markup=menu_for(update.effective_user.id))
 
 async def error_handler(update, context): log.exception('Unhandled bot error', exc_info=context.error)
 
 def main():
     if not TOKEN: raise SystemExit('❌ BOT_TOKEN সেট করা নেই।')
     if not ADMIN_IDS: raise SystemExit('❌ ADMIN_IDS সেট করা নেই।')
+    
+    # Start the Flask Keep-Alive Server thread
+    keep_alive()
+
     app = Application.builder().token(TOKEN).build()
     
     app.add_handler(CommandHandler('start', start))
@@ -814,7 +700,6 @@ def main():
     app.add_handler(CommandHandler('clearhistory', clear_history_cmd))
     app.add_handler(CommandHandler('notice', notice_cmd))
     
-    # Missing Accounts Handlers
     app.add_handler(CommandHandler('addmissing', addmissing_cmd))
     app.add_handler(CommandHandler('mymissing', mymissing_cmd))
     app.add_handler(CommandHandler('allmissing', allmissing_cmd))
@@ -832,7 +717,7 @@ def main():
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_submission))
     app.add_error_handler(error_handler)
     
-    log.info('🚀 RoMi STAR BOARD Master Edition (Premium) is starting...')
+    log.info('🚀 RoMi STAR BOARD Master Edition (24/7 Web Service) is starting...')
     app.run_polling(drop_pending_updates=False)
 
 if __name__=='__main__': main()
